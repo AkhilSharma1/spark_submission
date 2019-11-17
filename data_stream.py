@@ -6,7 +6,6 @@ import pyspark.sql.functions as psf
 from dateutil.parser import parse as parse_date
 
 
-# had to download and open the json file locally
 schema = StructType([
     StructField("crime_id", StringType(), True),
     StructField("original_crime_type_name", StringType(), True),
@@ -32,8 +31,6 @@ def udf_convert_time(timestamp):
 
 def run_spark_job(spark):
 
-    # Create Spark configurations with max offset of 200 per trigger
-    # set up correct bootstrap server and port
     df = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9092") \
@@ -42,10 +39,8 @@ def run_spark_job(spark):
         .option("startingOffsets", "earliest") \
         .load()
 
-    # Show schema for the incoming resources for checks
     df.printSchema()
 
-    # Take only value and convert it to String
     kafka_df = df.selectExpr("CAST(value AS STRING)")
 
     service_table = kafka_df\
@@ -68,16 +63,18 @@ def run_spark_job(spark):
     ).count()
     
     
-    converted_df = counts_df.withColumn(
-        "call_date_time", udf_convert_time(counts_df.call_date_time))
-    
-    calls_per_2_days = converted_df \
-            .groupBy(
-                psf.window(converted_df.call_date_time, "2 day")
-            ).agg(psf.count("crime_id").alias("calls_per_2_day")).select("calls_per_2_day")
+    converted_df = distinct_table.withColumn(
+        "call_date_time", udf_convert_time(distinct_table.call_datetime))
 
+    calls_per_2_days = converted_df \
+        .withWatermark("call_datetime", "2 day") \
+        .groupBy(
+        psf.window(converted_df.call_date_time, "2 day")
+    ).agg(psf.count("crime_id").alias("calls_per_2_day")).select("calls_per_2_day")
+
+    
     query = calls_per_2_days.writeStream \
-        .outputMode('Complete') \
+        .outputMode('complete') \
         .format('console') \
         .start()
 
@@ -87,13 +84,15 @@ def run_spark_job(spark):
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
-    spark = SparkSession.builder.master("local").appName("SFCrimeStatistics").getOrCreate()
+    spark = SparkSession.builder \
+        .master("spark://master:7077") \
+        .appName("SFCrimeStatistics").getOrCreate()
+        # Use .master("local") above to run in local mode
+
 
     logger.info("Spark started")
 
     run_spark_job(spark)
 
     spark.stop()
-
-
 
